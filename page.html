@@ -1,0 +1,130 @@
+<!DOCTYPE html>
+<html lang="en">
+
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Environment Model</title>
+    <script src="https://cdn.jsdelivr.net/npm/@tensorflow/tfjs@4.1.0"></script>
+</head>
+
+<body>
+    <script>
+        let constants;
+        let detectionSettings;
+        let labels = [
+            "Ball",
+            "Enemy",
+            "Friendly",
+            "Gem",
+            "Hot_Zone",
+            "Me",
+            "PP",
+            "PP_Box",
+            "Safe_Enemy",
+            "Safe_Friendly"
+        ];
+        let model_size = 256;
+
+        let model;
+
+        socket.addEventListener("message", async (event) => {
+            if (!model) {
+                await getModel();
+            }
+
+            let data = JSON.parse(event.data);
+
+            const imageData = createImageDataFromRGBArray(data.image, data.resolution);
+
+            let xRatio, yRatio;
+
+            console.time("model")
+            const [boxes, scores, classes] = tf.tidy(() => {
+                const maxSize = Math.max(data.resolution[0], data.resolution[1]);
+                xRatio = maxSize / data.resolution[0];
+                yRatio = maxSize / data.resolution[1];
+
+                const imgTensor = tf.image.resizeBilinear(tf.browser.fromPixels(imageData), [model_size, model_size])
+                    .div(255.0)
+                    .expandDims(0);
+
+                // execute model
+
+                const res = model.execute(imgTensor);
+
+                const transRes = res.transpose([0, 2, 1]);
+                const boxes = tf.tidy(() => {
+                    const w = transRes.slice([0, 0, 2], [-1, -1, 1]);
+                    const h = transRes.slice([0, 0, 3], [-1, -1, 1]);
+                    const x1 = tf.sub(transRes.slice([0, 0, 0], [-1, -1, 1]), tf.div(w, 2));
+                    const y1 = tf.sub(transRes.slice([0, 0, 1], [-1, -1, 1]), tf.div(h, 2));
+                    return tf
+                        .concat(
+                            [
+                                y1,
+                                x1,
+                                tf.add(y1, h),
+                                tf.add(x1, w),
+                            ],
+                            2
+                        )
+                        .squeeze();
+                });
+
+                const [scores, classes] = tf.tidy(() => {
+                    const rawScores = transRes.slice([0, 0, 4], [-1, -1, labels.length]).squeeze(0);
+                    return [rawScores.max(1), rawScores.argMax(1)];
+                });
+
+                return [boxes, scores, classes]
+            })
+            console.timeEnd("model")
+
+            console.time("nms")
+            const nms = await tf.image.nonMaxSuppressionAsync(boxes, scores, 30, 0.5, 0.5);
+            console.timeEnd("nms")
+
+            const boxes_data = boxes.gather(nms, 0).dataSync();
+            const scores_data = scores.gather(nms, 0).dataSync();
+            const classes_data = classes.gather(nms, 0).dataSync();
+
+            tf.dispose([nms, boxes, scores, classes])
+
+            const predictions = convertPredictions(boxes_data, scores_data, classes_data, [xRatio, yRatio], data.resolution);
+
+            socket.send(JSON.stringify({ id: data.id, predictions: predictions }));
+        });
+
+        async function getModel() {
+            await tf.setBackend('webgl');
+            await tf.ready();
+
+            model = await tf.loadGraphModel("/model.json");
+        }
+
+        function convertPredictions(boxes_data, scores_data, classes_data, ratios, resolution) {
+            const predictions = []
+
+            for (let i = 0; i < scores_data.length; ++i) {
+                const klass = labels[classes_data[i]];
+                const score = (scores_data[i] * 100).toFixed(1);
+
+                let [y1, x1, y2, x2] = boxes_data.slice(i * 4, (i + 1) * 4);
+
+                predictions.push({
+                    class: klass,
+                    score,
+                    x1: x1 / ratios[0],
+                    x2: x2 / ratios[0],
+                    y1: y1 / ratios[1],
+                    y2: y2 / ratios[1],
+                })
+            }
+
+            return predictions
+        }
+    </script>
+</body>
+
+</html>
