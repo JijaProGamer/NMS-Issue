@@ -9,9 +9,13 @@
 </head>
 
 <body>
+    <canvas class="image"></canvas>
+    <input type="file" id="imageUpload" accept="image/*">
+
     <script>
-        let constants;
-        let detectionSettings;
+        const canvas = document.querySelector("canvas")
+        const ctx = canvas.getContext('2d');
+
         let labels = [
             "Ball",
             "Enemy",
@@ -25,27 +29,22 @@
             "Safe_Friendly"
         ];
         let model_size = 256;
-
         let model;
 
-        socket.addEventListener("message", async (event) => {
+        async function detectImage(width, height) {
             if (!model) {
                 await getModel();
             }
-
-            let data = JSON.parse(event.data);
-
-            const imageData = createImageDataFromRGBArray(data.image, data.resolution);
 
             let xRatio, yRatio;
 
             console.time("model")
             const [boxes, scores, classes] = tf.tidy(() => {
-                const maxSize = Math.max(data.resolution[0], data.resolution[1]);
-                xRatio = maxSize / data.resolution[0];
-                yRatio = maxSize / data.resolution[1];
+                const maxSize = Math.max(width, height);
+                xRatio = maxSize / width;
+                yRatio = maxSize / height;
 
-                const imgTensor = tf.image.resizeBilinear(tf.browser.fromPixels(imageData), [model_size, model_size])
+                const imgTensor = tf.image.resizeBilinear(tf.browser.fromPixels(canvas), [model_size, model_size])
                     .div(255.0)
                     .expandDims(0);
 
@@ -91,16 +90,14 @@
 
             tf.dispose([nms, boxes, scores, classes])
 
-            const predictions = convertPredictions(boxes_data, scores_data, classes_data, [xRatio, yRatio], data.resolution);
-
-            socket.send(JSON.stringify({ id: data.id, predictions: predictions }));
-        });
+            return convertPredictions(boxes_data, scores_data, classes_data, [xRatio, yRatio], [width, height]);
+        };
 
         async function getModel() {
             await tf.setBackend('webgl');
             await tf.ready();
 
-            model = await tf.loadGraphModel("/model.json");
+            model = await tf.loadGraphModel("https://raw.githubusercontent.com/JijaProGamer/NMS-Issue/master/model/model.json");
         }
 
         function convertPredictions(boxes_data, scores_data, classes_data, ratios, resolution) {
@@ -124,6 +121,37 @@
 
             return predictions
         }
+
+        function drawDetections(detections){
+            for(let detection of detections){
+                ctx.lineWidth = 2
+                //ctx.strokeRect(detection.x1, detection.x2, detection.x2 - detection.x1, detection.x2 - detection.x1);
+            }
+        }
+
+        document.getElementById('imageUpload').addEventListener('change',  function (event) {
+            const file = event.target.files[0];
+            if (!file) {
+                return;
+            }
+
+            const reader = new FileReader();
+            reader.onload = function (e) {
+                const img = new Image();
+                img.onload = async function () {
+                    canvas.width = img.width;
+                    canvas.height = img.height;
+                    ctx.drawImage(img, 0, 0, canvas.width, canvas.height);
+
+                    drawDetections(await detectImage(img.width, img.height));
+                };
+
+                img.src = e.target.result;
+            };
+
+            reader.readAsDataURL(file);
+
+        });
     </script>
 </body>
 
